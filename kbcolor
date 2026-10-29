@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Set the keyboard RGB color/brightness (Uniwill 1-zone RGB via tuxedo-drivers).
+
+  kbcolor ff8800          hex color
+  kbcolor "#ff8800"
+  kbcolor 255 136 0       r g b
+  kbcolor purple          named color
+  kbcolor -b 2            brightness 0-4 (0 = off)
+  kbcolor --off
+  kbcolor --restore       re-apply the saved color (used at boot)
+  kbcolor --gui           open the color picker
+"""
+import json
+import os
+import sys
+
+LED = "/sys/class/leds/rgb:kbd_backlight"
+STATE = "/var/lib/kbrgb/state.json"
+MAX_BRIGHTNESS = 4
+
+NAMED = {
+    "white": (255, 255, 255), "red": (255, 0, 0), "green": (0, 255, 0),
+    "blue": (0, 0, 255), "yellow": (255, 200, 0), "orange": (255, 100, 0),
+    "purple": (160, 0, 255), "pink": (255, 40, 140), "cyan": (0, 220, 255),
+    "magenta": (255, 0, 255), "lime": (120, 255, 0), "teal": (0, 160, 140),
+}
+
+
+def load_state():
+    try:
+        with open(STATE) as f:
+            s = json.load(f)
+        return {"rgb": [int(x) for x in s["rgb"]], "brightness": int(s["brightness"])}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def save_state(rgb, brightness):
+    try:
+        with open(STATE, "w") as f:
+            json.dump({"rgb": list(rgb), "brightness": brightness}, f)
+        os.chmod(STATE, 0o664)
+    except OSError:
+        pass
+
+
+def current():
+    with open(f"{LED}/multi_intensity") as f:
+        rgb = [int(x) for x in f.read().split()]
+    with open(f"{LED}/brightness") as f:
+        return rgb, int(f.read())
+
+
+def apply(rgb, brightness):
+    rgb = [max(0, min(255, int(c))) for c in rgb]
+    brightness = max(0, min(MAX_BRIGHTNESS, int(brightness)))
+    with open(f"{LED}/multi_intensity", "w") as f:
+        f.write("%d %d %d" % tuple(rgb))
+    with open(f"{LED}/brightness", "w") as f:
+        f.write(str(brightness))
+    save_state(rgb, brightness)
+
+
+def parse_color(args):
+    if len(args) == 3:
+        return [int(a) for a in args]
+    if len(args) == 1:
+        a = args[0].lower().lstrip("#")
+        if a in NAMED:
+            return list(NAMED[a])
+        if len(a) == 6:
+            return [int(a[i:i + 2], 16) for i in (0, 2, 4)]
+    raise ValueError("unrecognised color: " + " ".join(args))
+
+
+def gui():
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gdk, GLib, Gtk
+
+    rgb, brightness = current()
+    pending = {"rgb": rgb, "brightness": brightness, "timer": None}
+
+    def flush():
+        pending["timer"] = None
+        try:
+            apply(pending["rgb"], pending["brightness"])
+        except OSError as e:
+            status.set_text("Cannot write to the LED: %s" % e)
+        return False
+
+    def schedule():
+        if pending["timer"] is None:
+            pending["timer"] = GLib.timeout_add(40, flush)
+
+    def on_color(chooser, _pspec):
+        c = chooser.get_rgba()
+        pending["rgb"] = [round(c.red * 255), round(c.green * 255), round(c.blue * 255)]
+        if pending["brightness"] == 0:
+            pending["brightness"] = MAX_BRIGHTNESS
+            scale.set_value(MAX_BRIGHTNESS)
+        schedule()
+
+    def on_brightness(s):
+        pending["brightness"] = int(round(s.get_value()))
+        schedule()
+
+    win = Gtk.Window(title="Keyboard RGB")
+    win.set_default_size(380, -1)
+    win.set_border_width(12)
+    win.connect("destroy", Gtk.main_quit)
+
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+    win.add(box)
+
+    chooser = Gtk.ColorChooserWidget(use_alpha=False, show_editor=True)
+    chooser.set_rgba(Gdk.RGBA(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255, 1))
+    chooser.connect("notify::rgba", on_color)
+    box.pack_start(chooser, True, True, 0)
+
+    box.pack_start(Gtk.Label(label="Brightness", xalign=0), False, False, 0)
+    scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, MAX_BRIGHTNESS, 1)
+    scale.set_value(brightness)
+    scale.set_digits(0)
+    scale.add_mark(0, Gtk.PositionType.BOTTOM, "Off")
+    scale.add_mark(MAX_BRIGHTNESS, Gtk.PositionType.BOTTOM, "Max")
+    scale.connect("value-changed", on_brightness)
+    box.pack_start(scale, False, False, 0)
+
+    status = Gtk.Label(label="", xalign=0)
+    box.pack_start(status, False, False, 0)
+
+    win.show_all()
+    Gtk.main()
+
+
+def main(argv):
+    if not os.path.isdir(LED):
+        sys.exit("kbcolor: %s not found (is the uniwill_wmi module loaded?)" % LED)
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        rgb, b = current()
+        print("current: rgb=%s brightness=%d" % (rgb, b))
+        return
+    if argv[0] == "--gui":
+        return gui()
+    if argv[0] == "--restore":
+        s = load_state()
+        if s:
+            apply(s["rgb"], s["brightness"])
+        return
+    if argv[0] == "--off":
+        rgb, _ = current()
+        return apply(rgb, 0)
+    if argv[0] in ("-b", "--brightness"):
+        rgb, _ = current()
+        return apply(rgb, int(argv[1]))
+    rgb, b = current()
+    apply(parse_color(argv), b or MAX_BRIGHTNESS)
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except PermissionError as e:
+        sys.exit("kbcolor: permission denied (%s). Log out and back in after installing, "
+                 "so your user is in the 'kbrgb' group." % e.filename)
+    except ValueError as e:
+        sys.exit("kbcolor: %s" % e)
