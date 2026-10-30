@@ -60,7 +60,7 @@ If Secure Boot is enabled, the DKMS modules must be signed and enrolled, or the 
 **Command line:**
 
 ```bash
-kbcolor purple          # named color: white red green blue yellow orange purple pink cyan magenta lime teal
+kbcolor purple          # named color: white red orange amber yellow lemon lime green mint teal cyan sky blue indigo purple magenta pink hotpink
 kbcolor ff8800          # hex (a leading # works too)
 kbcolor 0 120 255       # r g b, 0-255
 kbcolor -b 2            # brightness 0-4 (0 = off)
